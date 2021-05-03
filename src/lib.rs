@@ -78,18 +78,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::future::Future;
+use std::{fs::{DirEntry, ReadDir, read_dir}, future::Future};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use async_fs::{read_dir, ReadDir};
 use futures_lite::future::Boxed as BoxedFut;
 use futures_lite::future::FutureExt;
 use futures_lite::stream::{self, Stream, StreamExt};
 
-#[doc(no_inline)]
-pub use async_fs::DirEntry;
 #[doc(no_inline)]
 pub use std::io::Result;
 
@@ -128,7 +125,7 @@ impl WalkDir {
             root: root.as_ref().to_owned(),
             entries: walk_dir(
                 root,
-                None::<Box<dyn FnMut(DirEntry) -> BoxedFut<Filtering> + Send>>,
+                None::<Box<dyn FnMut(&DirEntry) -> BoxedFut<Filtering> + Send>>,
             ),
         }
     }
@@ -136,7 +133,7 @@ impl WalkDir {
     /// Filter entries.
     pub fn filter<F, Fut>(self, f: F) -> Self
     where
-        F: FnMut(DirEntry) -> Fut + Send + 'static,
+        F: FnMut(&DirEntry) -> Fut + Send + 'static,
         Fut: Future<Output = Filtering> + Send,
     {
         let root = self.root.clone();
@@ -158,14 +155,14 @@ impl Stream for WalkDir {
 
 fn walk_dir<F, Fut>(root: impl AsRef<Path>, filter: Option<F>) -> BoxStream
 where
-    F: FnMut(DirEntry) -> Fut + Send + 'static,
+    F: FnMut(&DirEntry) -> Fut + Send + 'static,
     Fut: Future<Output = Filtering> + Send,
 {
     stream::unfold(
         State::Start((root.as_ref().to_owned(), filter)),
         move |state| async move {
             match state {
-                State::Start((root, filter)) => match read_dir(root).await {
+                State::Start((root, filter)) => match read_dir(root){
                     Err(e) => return Some((Err(e), State::Done)),
                     Ok(rd) => return walk(vec![rd], filter).await,
                 },
@@ -187,12 +184,12 @@ type UnfoldState<F> = (Result<DirEntry>, State<F>);
 
 fn walk<F, Fut>(mut dirs: Vec<ReadDir>, filter: Option<F>) -> BoxedFut<Option<UnfoldState<F>>>
 where
-    F: FnMut(DirEntry) -> Fut + Send + 'static,
+    F: FnMut(&DirEntry) -> Fut + Send + 'static,
     Fut: Future<Output = Filtering> + Send,
 {
     async move {
         if let Some(dir) = dirs.last_mut() {
-            match dir.next().await {
+            match dir.next(){
                 Some(Ok(entry)) => walk_entry(entry, dirs, filter).await,
                 Some(Err(e)) => Some((Err(e), State::Walk((dirs, filter)))),
                 None => {
@@ -213,19 +210,19 @@ fn walk_entry<F, Fut>(
     mut filter: Option<F>,
 ) -> BoxedFut<Option<UnfoldState<F>>>
 where
-    F: FnMut(DirEntry) -> Fut + Send + 'static,
+    F: FnMut(&DirEntry) -> Fut + Send + 'static,
     Fut: Future<Output = Filtering> + Send,
 {
     async move {
-        match entry.file_type().await {
+        match entry.file_type(){
             Err(e) => Some((Err(e), State::Walk((dirs, filter)))),
             Ok(ft) => {
                 let filtering = match filter.as_mut() {
-                    Some(filter) => filter(entry.clone()).await,
+                    Some(filter) => filter(&entry).await,
                     None => Filtering::Continue,
                 };
                 if ft.is_dir() {
-                    let rd = match read_dir(entry.path()).await {
+                    let rd = match read_dir(entry.path()){
                         Err(e) => return Some((Err(e), State::Walk((dirs, filter)))),
                         Ok(rd) => rd,
                     };
